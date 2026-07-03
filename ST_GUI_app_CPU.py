@@ -575,62 +575,16 @@ if predict_clicked:
     st.session_state["shap_in_progress"] = False
 
     try:
-        # ---------- 第一步：先快速完成预测 ----------
         X_input = transform_input(artifacts["preprocessor"], raw_input_df)
         y_pred = safe_predict(artifacts["model"], X_input)
 
         st.session_state["raw_input_df"] = raw_input_df.copy()
         st.session_state["X_input"] = X_input.copy()
         st.session_state["y_pred"] = y_pred
-
-        # 标记 SHAP 正在进行
         st.session_state["shap_in_progress"] = True
 
-        # 先让用户立刻看到预测值
-        st.success("预测完成。")
-        st.markdown(
-            f"""
-            <div style="background-color:#F3F3F3;padding:14px;border-radius:8px;text-align:center;margin-top:10px;">
-                <div style="font-size:28px;font-weight:800;color:#000000;line-height:1.4;">
-                    预测 ST = {y_pred:.2f}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # 提示 SHAP 正在计算
-        shap_status = st.info("正在为当前样本生成 SHAP 分析...")
-
-        # ---------- 第二步：继续生成 SHAP ----------
-        try:
-            current_explainer = artifacts["explainer"]
-            current_explainer_source = artifacts.get("explainer_source")
-
-            if current_explainer is None:
-                current_explainer, current_explainer_source = get_runtime_fallback_explainer(
-                    artifacts["model"],
-                    artifacts["preprocessor"]
-                )
-
-            local_exp = make_local_shap_explanation(current_explainer, X_input)
-
-            st.session_state["local_shap_exp"] = local_exp
-            st.session_state["local_shap_ok"] = True
-            st.session_state["local_shap_error"] = ""
-            st.session_state["local_shap_source"] = current_explainer_source
-            st.session_state["shap_in_progress"] = False
-
-            shap_status.success("SHAP 分析完成。")
-
-        except Exception:
-            st.session_state["local_shap_exp"] = None
-            st.session_state["local_shap_ok"] = False
-            st.session_state["local_shap_error"] = traceback.format_exc()
-            st.session_state["local_shap_source"] = None
-            st.session_state["shap_in_progress"] = False
-
-            shap_status.warning("预测已完成，但未能生成 SHAP 分析。")
+        # 先刷新页面，让 ST 预测结果可见，再进入 SHAP 计算阶段。
+        st.rerun()
 
     except Exception:
         st.session_state["shap_in_progress"] = False
@@ -651,6 +605,7 @@ st.markdown(
 )
 
 if "y_pred" in st.session_state:
+    st.success("预测完成。")
     st.markdown(
         f"""
         <div style="background-color:#F3F3F3;padding:14px;border-radius:8px;text-align:center;">
@@ -681,7 +636,39 @@ st.markdown(
 )
 
 if st.session_state.get("shap_in_progress", False):
-    st.info("正在为当前样本生成 SHAP 分析，请稍候。")
+    st.info("ST 结果已生成，正在为当前样本计算 SHAP 分析，请稍候。")
+
+    try:
+        current_explainer = artifacts["explainer"]
+        current_explainer_source = artifacts.get("explainer_source")
+
+        if current_explainer is None:
+            current_explainer, current_explainer_source = get_runtime_fallback_explainer(
+                artifacts["model"],
+                artifacts["preprocessor"],
+            )
+
+        local_exp = make_local_shap_explanation(
+            current_explainer,
+            st.session_state["X_input"],
+        )
+
+        st.session_state["local_shap_exp"] = local_exp
+        st.session_state["local_shap_ok"] = True
+        st.session_state["local_shap_error"] = ""
+        st.session_state["local_shap_source"] = current_explainer_source
+        st.session_state["shap_in_progress"] = False
+
+        st.rerun()
+
+    except Exception:
+        st.session_state["local_shap_exp"] = None
+        st.session_state["local_shap_ok"] = False
+        st.session_state["local_shap_error"] = traceback.format_exc()
+        st.session_state["local_shap_source"] = None
+        st.session_state["shap_in_progress"] = False
+
+        st.rerun()
 
 elif "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
     local_exp = st.session_state["local_shap_exp"]
