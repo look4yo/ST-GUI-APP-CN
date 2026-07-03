@@ -29,9 +29,7 @@ artifacts/gui/
   shap_explainer_TabPFN_CPU_ST.joblib
 ```
 
-当前仓库是 public。为避免未确认的模型文件公开发布，`.joblib` 文件没有提交到 GitHub。未放置这些文件时，页面可以启动，但预测功能会提示本地模型文件未能加载。
-
-如需让云端部署完整可预测，需要确认这些模型文件可以公开后，再把上述三个文件放入 `artifacts/gui/` 并提交。
+上述三个 `.joblib` 文件已随仓库提交，用于让 Streamlit Cloud 部署后可以直接完成预测和 SHAP 分析。
 
 ## 说明
 

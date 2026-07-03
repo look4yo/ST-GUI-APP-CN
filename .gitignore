@@ -4,6 +4,14 @@ __pycache__/
 .env
 *.log
 
-# Model artifacts are intentionally not committed to this public repo by default.
-artifacts/
+# GUI artifacts required by Streamlit Cloud deployment.
+artifacts/*
+!artifacts/gui/
+artifacts/gui/*
+!artifacts/gui/TabPFN_CPU_ST_model.joblib
+!artifacts/gui/TabPFN_CPU_ST_preprocessor.joblib
+!artifacts/gui/shap_explainer_TabPFN_CPU_ST.joblib
 *.joblib
+!artifacts/gui/TabPFN_CPU_ST_model.joblib
+!artifacts/gui/TabPFN_CPU_ST_preprocessor.joblib
+!artifacts/gui/shap_explainer_TabPFN_CPU_ST.joblib
