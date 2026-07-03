@@ -82,6 +82,23 @@ RAW_FEATURES = [
     "Ag2.36", "Ag4.75", "Ag9.5", "FT", "FC", "FL", "TS"
 ]
 
+INPUT_LABELS = {
+    "Pe": "Pe (针入度, 0.1 mm)",
+    "Du": "Du (延度, cm)",
+    "SP": "SP (软化点, °C)",
+    "AC": "AC (沥青用量, wt.%)",
+    "AV": "AV (空隙率, %)",
+    "VMA": "VMA (矿料间隙率, %)",
+    "VFA": "VFA (沥青饱和度, %)",
+    "Ag2.36": "Ag2.36 (2.36 mm 通过率, %)",
+    "Ag4.75": "Ag4.75 (4.75 mm 通过率, %)",
+    "Ag9.5": "Ag9.5 (9.5 mm 通过率, %)",
+    "FT": "FT (纤维类型)",
+    "FC": "FC (纤维掺量, wt.%)",
+    "FL": "FL (纤维长度, mm)",
+    "TS": "TS (纤维抗拉强度, MPa)",
+}
+
 DEFAULT_INPUT = {
     "Pe": 91.8,
     "Du": 150.0,
@@ -466,50 +483,34 @@ def build_raw_input_df(ft_options):
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3 = st.columns(3)
+    default_ft = str(DEFAULT_INPUT["FT"]).strip()
+    default_idx = 0
+    for i, opt in enumerate(ft_options):
+        if str(opt).strip() == default_ft or str(opt).strip().lower() == default_ft.lower():
+            default_idx = i
+            break
 
-    with c1:
-        pe = st.number_input("Pe", *RANGES["Pe"][:2], value=DEFAULT_INPUT["Pe"], step=RANGES["Pe"][2])
-        du = st.number_input("Du", *RANGES["Du"][:2], value=DEFAULT_INPUT["Du"], step=RANGES["Du"][2])
-        sp = st.number_input("SP", *RANGES["SP"][:2], value=DEFAULT_INPUT["SP"], step=RANGES["SP"][2])
-        ac = st.number_input("AC", *RANGES["AC"][:2], value=DEFAULT_INPUT["AC"], step=RANGES["AC"][2])
-        av = st.number_input("AV", *RANGES["AV"][:2], value=DEFAULT_INPUT["AV"], step=RANGES["AV"][2])
+    values = {}
+    for row_start in range(0, len(RAW_FEATURES), 3):
+        cols = st.columns(3)
+        for col, feature in zip(cols, RAW_FEATURES[row_start:row_start + 3], strict=False):
+            with col:
+                if feature == "FT":
+                    values[feature] = st.selectbox(
+                        INPUT_LABELS[feature],
+                        options=ft_options,
+                        index=default_idx,
+                        format_func=format_ft_option,
+                    )
+                else:
+                    values[feature] = st.number_input(
+                        INPUT_LABELS[feature],
+                        *RANGES[feature][:2],
+                        value=DEFAULT_INPUT[feature],
+                        step=RANGES[feature][2],
+                    )
 
-    with c2:
-        vma = st.number_input("VMA", *RANGES["VMA"][:2], value=DEFAULT_INPUT["VMA"], step=RANGES["VMA"][2])
-        vfa = st.number_input("VFA", *RANGES["VFA"][:2], value=DEFAULT_INPUT["VFA"], step=RANGES["VFA"][2])
-        ag236 = st.number_input("Ag2.36", *RANGES["Ag2.36"][:2], value=DEFAULT_INPUT["Ag2.36"], step=RANGES["Ag2.36"][2])
-        ag475 = st.number_input("Ag4.75", *RANGES["Ag4.75"][:2], value=DEFAULT_INPUT["Ag4.75"], step=RANGES["Ag4.75"][2])
-        ag95 = st.number_input("Ag9.5", *RANGES["Ag9.5"][:2], value=DEFAULT_INPUT["Ag9.5"], step=RANGES["Ag9.5"][2])
-
-    with c3:
-        default_ft = str(DEFAULT_INPUT["FT"]).strip()
-        default_idx = 0
-        for i, opt in enumerate(ft_options):
-            if str(opt).strip() == default_ft or str(opt).strip().lower() == default_ft.lower():
-                default_idx = i
-                break
-        ft = st.selectbox("FT", options=ft_options, index=default_idx, format_func=format_ft_option)
-        fc = st.number_input("FC", *RANGES["FC"][:2], value=DEFAULT_INPUT["FC"], step=RANGES["FC"][2])
-        fl = st.number_input("FL", *RANGES["FL"][:2], value=DEFAULT_INPUT["FL"], step=RANGES["FL"][2])
-        ts = st.number_input("TS", *RANGES["TS"][:2], value=DEFAULT_INPUT["TS"], step=RANGES["TS"][2])
-
-    raw_df = pd.DataFrame([{
-        "Pe": pe,
-        "Du": du,
-        "SP": sp,
-        "AC": ac,
-        "AV": av,
-        "VMA": vma,
-        "VFA": vfa,
-        "Ag2.36": ag236,
-        "Ag4.75": ag475,
-        "Ag9.5": ag95,
-        "FT": ft,
-        "FC": fc,
-        "FL": fl,
-        "TS": ts,
-    }])
+    raw_df = pd.DataFrame([{feature: values[feature] for feature in RAW_FEATURES}])
     return raw_df
 
 
@@ -558,9 +559,6 @@ if artifacts["errors"]:
 # ============================================================
 ft_options = get_ft_options_from_preprocessor(artifacts["preprocessor"])
 raw_input_df = build_raw_input_df(ft_options)
-
-st.write("### 当前原始输入")
-st.dataframe(raw_input_df, use_container_width=True)
 
 
 # ============================================================
