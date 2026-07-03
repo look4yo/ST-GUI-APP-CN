@@ -1,6 +1,5 @@
 import warnings
 from pathlib import Path
-import sys
 import traceback
 
 import joblib
@@ -31,11 +30,7 @@ except Exception:
 # 基础路径
 # ============================================================
 BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from scripts.project_paths import GUI_ARTIFACTS_DIR  # noqa: E402
+GUI_ARTIFACTS_DIR = BASE_DIR / "artifacts" / "gui"
 
 
 CHINESE_FONT_CANDIDATES = [
