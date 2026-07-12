@@ -73,6 +73,12 @@ PREPROCESSOR_PATH = GUI_ARTIFACTS_DIR / "TabPFN_CPU_ST_preprocessor.joblib"
 EXPLAINER_PATH_CPU = GUI_ARTIFACTS_DIR / "shap_explainer_TabPFN_CPU_ST.joblib"
 EXPLAINER_PATH_GPU = GUI_ARTIFACTS_DIR / "shap_explainer_TabPFN_GPU_ST.joblib"
 
+# TabPFN 在 Streamlit Community Cloud 的 CPU 容器中运行时，直接调用
+# shap.SamplingExplainer 可能触发底层进程崩溃。以下参数用于以保存的
+# background 为基准进行轻量级 Shapley 采样，避免在界面线程中执行该调用。
+LOCAL_SHAPLEY_PERMUTATIONS = 8
+LOCAL_SHAPLEY_RANDOM_SEED = 20260712
+
 
 # ============================================================
 # 原始输入特征（14个）
@@ -276,8 +282,8 @@ artifacts = load_artifacts()
 
 
 @st.cache_resource(show_spinner=False)
-def load_saved_explainer():
-    """仅在用户请求局部 SHAP 分析时加载保存的 explainer。"""
+def load_saved_shap_background():
+    """延迟读取保存的 SHAP background，而不执行保存 explainer 的推理逻辑。"""
     load_errors = []
     for path, source in [
         (EXPLAINER_PATH_CPU, "cpu_joblib"),
@@ -287,7 +293,19 @@ def load_saved_explainer():
             load_errors.append(f"未找到 explainer 文件: {path}")
             continue
         try:
-            return joblib.load(path), source
+            saved_explainer = joblib.load(path)
+            saved_background = getattr(saved_explainer, "data", None)
+            saved_background = getattr(saved_background, "data", saved_background)
+            background_array = np.asarray(saved_background, dtype=np.float32)
+            if background_array.ndim != 2 or background_array.shape[0] == 0:
+                raise ValueError(
+                    "保存的 explainer 未包含有效的二维 background 数据。"
+                )
+
+            # 只缓存小型 background 数组，避免常驻 40 MB 以上的 explainer/model 对象。
+            background_array = background_array.copy()
+            del saved_explainer
+            return background_array, source
         except Exception:
             load_errors.append(f"加载失败: {path}\n{traceback.format_exc()}")
 
@@ -398,20 +416,9 @@ def build_fallback_background(preprocessor):
 
 
 @st.cache_resource(show_spinner=False)
-def get_runtime_fallback_explainer(_model, _preprocessor):
+def get_runtime_fallback_background(_preprocessor):
     background_df = build_fallback_background(_preprocessor)
-    try:
-        explainer = shap.SamplingExplainer(_model.predict, background_df)
-        return explainer, "runtime_sampling"
-    except Exception:
-        explainer = shap.Explainer(_model.predict, background_df)
-        return explainer, "runtime_generic"
-
-
-def make_local_shap_explanation(explainer, X_df):
-    if explainer is None:
-        raise RuntimeError("未能加载 SHAP explainer，无法生成单样本 SHAP 解释。")
-    return explainer(X_df)
+    return background_df.to_numpy(dtype=np.float32), "runtime_default"
 
 
 def format_raw_feature_value(feature_name: str, value) -> str:
@@ -476,6 +483,108 @@ def aggregate_shap_to_original_features(
     base_value = float(np.asarray(sample_exp.base_values).reshape(-1)[0])
     return shap.Explanation(
         values=np.array([grouped_values[name] for name in RAW_FEATURES], dtype=float),
+        base_values=base_value,
+        data=np.array(
+            [format_raw_feature_value(name, raw_input_row[name]) for name in RAW_FEATURES],
+            dtype=object,
+        ),
+        feature_names=[FEATURE_DISPLAY_NAMES[name] for name in RAW_FEATURES],
+    )
+
+
+def get_original_feature_groups(transformed_feature_names):
+    """返回每个原始工程变量在模型输入空间中的列索引。"""
+    groups = {name: [] for name in RAW_FEATURES}
+    for index, processed_name in enumerate(transformed_feature_names):
+        original_name = get_original_feature_name(str(processed_name))
+        groups[original_name].append(index)
+
+    missing_groups = [name for name, indices in groups.items() if not indices]
+    if missing_groups:
+        raise ValueError(
+            "转换后的模型输入缺少以下原始变量对应列："
+            f"{missing_groups}。"
+        )
+    return {name: np.asarray(indices, dtype=int) for name, indices in groups.items()}
+
+
+def estimate_local_shapley_explanation(
+    model,
+    X_df: pd.DataFrame,
+    raw_input_row: pd.Series,
+    background_array: np.ndarray,
+    prediction: float,
+    n_permutations: int = LOCAL_SHAPLEY_PERMUTATIONS,
+) -> shap.Explanation:
+    """
+    以保存的 background 对局部贡献进行 Monte Carlo Shapley 采样。
+
+    该实现只使用模型的批量预测接口，不调用 SamplingExplainer；这是为了避免
+    Streamlit Community Cloud 的 CPU 容器在 SamplingExplainer 推理阶段崩溃。
+    """
+    transformed_feature_names = [str(name) for name in X_df.columns]
+    feature_groups = get_original_feature_groups(transformed_feature_names)
+    target_row = X_df.to_numpy(dtype=np.float32, copy=True).reshape(-1)
+    background_array = np.asarray(background_array, dtype=np.float32)
+
+    if background_array.ndim != 2:
+        raise ValueError("SHAP background 必须是二维数组。")
+    if background_array.shape[1] != len(transformed_feature_names):
+        raise ValueError(
+            "SHAP background 的特征数量与当前模型输入不一致："
+            f"{background_array.shape[1]} != {len(transformed_feature_names)}。"
+        )
+
+    missing_raw_features = [name for name in RAW_FEATURES if name not in raw_input_row.index]
+    if missing_raw_features:
+        raise ValueError(f"原始输入缺少必要字段：{missing_raw_features}。")
+
+    sample_count = min(max(1, int(n_permutations)), len(background_array))
+    random_generator = np.random.default_rng(LOCAL_SHAPLEY_RANDOM_SEED)
+    background_indices = random_generator.choice(
+        len(background_array), size=sample_count, replace=False
+    )
+
+    path_rows = []
+    path_metadata = []
+    for background_index in background_indices:
+        state = background_array[background_index].copy()
+        feature_order = [str(name) for name in random_generator.permutation(RAW_FEATURES)]
+        path_start = len(path_rows)
+        path_rows.append(state.copy())
+        for feature_name in feature_order:
+            state[feature_groups[feature_name]] = target_row[feature_groups[feature_name]]
+            path_rows.append(state.copy())
+        path_metadata.append((path_start, feature_order))
+
+    path_df = pd.DataFrame(
+        np.asarray(path_rows, dtype=np.float32), columns=transformed_feature_names
+    )
+    path_predictions = np.asarray(model.predict(path_df), dtype=float).reshape(-1)
+    expected_path_count = sample_count * (len(RAW_FEATURES) + 1)
+    if len(path_predictions) != expected_path_count:
+        raise RuntimeError(
+            "局部贡献计算返回的预测数量异常："
+            f"{len(path_predictions)} != {expected_path_count}。"
+        )
+
+    grouped_values = {name: 0.0 for name in RAW_FEATURES}
+    for path_start, feature_order in path_metadata:
+        for order_index, feature_name in enumerate(feature_order):
+            grouped_values[feature_name] += (
+                path_predictions[path_start + order_index + 1]
+                - path_predictions[path_start + order_index]
+            )
+    for feature_name in grouped_values:
+        grouped_values[feature_name] /= sample_count
+
+    values = np.array([grouped_values[name] for name in RAW_FEATURES], dtype=float)
+
+    # TabPFN 的批量预测会受同批样本组成轻微影响。这里以 GUI 的单样本预测值
+    # 作为最终输出，基准值由该输出与贡献之和确定，从而严格保持加和关系。
+    base_value = float(prediction - values.sum())
+    return shap.Explanation(
+        values=values,
         base_values=base_value,
         data=np.array(
             [format_raw_feature_value(name, raw_input_row[name]) for name in RAW_FEATURES],
@@ -798,25 +907,22 @@ st.markdown(
 )
 
 if st.session_state.get("shap_in_progress", False):
-    st.info("ST 结果已生成，正在为当前样本计算 SHAP 分析，请稍候。")
+    st.info("ST 结果已生成，正在为当前样本计算局部 SHAP 贡献，请稍候。")
 
     try:
         try:
-            current_explainer, current_explainer_source = load_saved_explainer()
+            current_background, current_explainer_source = load_saved_shap_background()
         except Exception:
-            current_explainer, current_explainer_source = get_runtime_fallback_explainer(
-                artifacts["model"],
+            current_background, current_explainer_source = get_runtime_fallback_background(
                 artifacts["preprocessor"],
             )
 
-        local_exp = make_local_shap_explanation(
-            current_explainer,
-            st.session_state["X_input"],
-        )
-        aggregated_sample_exp = aggregate_shap_to_original_features(
-            sample_exp=local_exp[0],
-            transformed_feature_names=st.session_state["X_input"].columns,
+        aggregated_sample_exp = estimate_local_shapley_explanation(
+            model=artifacts["model"],
+            X_df=st.session_state["X_input"],
             raw_input_row=st.session_state["raw_input_df"].iloc[0],
+            background_array=current_background,
+            prediction=st.session_state["y_pred"],
         )
         diagnostics = build_shap_diagnostics(
             aggregated_sample_exp,
