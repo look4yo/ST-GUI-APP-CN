@@ -13,6 +13,46 @@ warnings.filterwarnings("ignore")
 
 
 # ============================================================
+# Matplotlib 中文字体配置
+# ============================================================
+def _setup_chinese_font():
+    """配置 Matplotlib 中文字体，避免 SHAP 图表出现方框。"""
+    import matplotlib.font_manager as fm
+
+    try:
+        fm.fontManager = fm._load_fontmanager(try_read_cache=False)
+    except Exception:
+        pass
+
+    preferred_fonts = [
+        "Microsoft YaHei",
+        "SimHei",
+        "SimSun",
+        "Noto Sans CJK SC",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK",
+        "WenQuanYi Micro Hei",
+        "Source Han Sans SC",
+    ]
+    available = {f.name for f in fm.fontManager.ttflist}
+    chosen = None
+    for font in preferred_fonts:
+        if font in available:
+            chosen = font
+            break
+
+    fallbacks = [f for f in preferred_fonts if f in available and f != chosen]
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ([chosen] if chosen else []) + fallbacks + ["DejaVu Sans"]
+    plt.rcParams["axes.unicode_minus"] = False
+    return chosen
+
+
+_CHINESE_FONT = _setup_chinese_font()
+
+
+# ============================================================
 # sklearn 版本兼容补丁
 # ============================================================
 try:
