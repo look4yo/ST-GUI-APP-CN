@@ -153,6 +153,42 @@ FT_DISPLAY_LABELS = {
     "Steel fiber": "钢纤维 (Steel fiber)",
 }
 
+FEATURE_DISPLAY_NAMES = {
+    "Pe": "Pe（针入度）",
+    "Du": "Du（延度）",
+    "SP": "SP（软化点）",
+    "AC": "AC（沥青用量）",
+    "AV": "AV（空隙率）",
+    "VMA": "VMA（矿料间隙率）",
+    "VFA": "VFA（沥青饱和度）",
+    "Ag2.36": "Ag2.36（2.36 mm 通过率）",
+    "Ag4.75": "Ag4.75（4.75 mm 通过率）",
+    "Ag9.5": "Ag9.5（9.5 mm 通过率）",
+    "FT": "FT（纤维类型）",
+    "FC": "FC（纤维掺量）",
+    "FL": "FL（纤维长度）",
+    "TS": "TS（纤维抗拉强度）",
+}
+
+FEATURE_VALUE_UNITS = {
+    "Pe": "0.1 mm",
+    "Du": "cm",
+    "SP": "°C",
+    "AC": "wt.%",
+    "AV": "%",
+    "VMA": "%",
+    "VFA": "%",
+    "Ag2.36": "%",
+    "Ag4.75": "%",
+    "Ag9.5": "%",
+    "FC": "wt.%",
+    "FL": "mm",
+    "TS": "MPa",
+}
+
+WATERFALL_TOP_FEATURE_COUNT = 8
+WATERFALL_MAX_DISPLAY = WATERFALL_TOP_FEATURE_COUNT + 1
+
 
 def format_ft_option(option):
     return FT_DISPLAY_LABELS.get(str(option), str(option))
@@ -379,12 +415,136 @@ def make_local_shap_explanation(explainer, X_df):
     return explainer(X_df)
 
 
-def plot_waterfall_from_explanation(sample_exp, max_display=12):
+def format_raw_feature_value(feature_name: str, value) -> str:
+    """将 GUI 原始输入格式化为 Waterfall 图和贡献表的展示值。"""
+    if feature_name == "FT":
+        return format_ft_option(value)
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    unit = FEATURE_VALUE_UNITS.get(feature_name, "")
+    return f"{numeric_value:.2f} {unit}".strip()
+
+
+def get_original_feature_name(processed_name: str) -> str:
+    """将模型输入空间的列名映射到原始工程变量名。"""
+    if processed_name in RAW_FEATURES:
+        return processed_name
+    if processed_name.startswith("FT_"):
+        return "FT"
+    raise ValueError(
+        f"无法将预处理特征“{processed_name}”映射到原始输入变量。"
+        "请检查预处理器输出列名和 RAW_FEATURES 配置。"
+    )
+
+
+def aggregate_shap_to_original_features(
+    sample_exp: shap.Explanation,
+    transformed_feature_names,
+    raw_input_row: pd.Series,
+) -> shap.Explanation:
+    """按原始工程变量聚合单样本 SHAP 值，并保留 GUI 原始输入作为展示数据。"""
+    values = np.asarray(sample_exp.values).reshape(-1)
+    processed_names = [str(name) for name in transformed_feature_names]
+
+    if len(values) != len(processed_names):
+        raise ValueError(
+            "SHAP 值数量与转换后特征数量不一致："
+            f"{len(values)} != {len(processed_names)}。"
+        )
+
+    missing_raw_features = [name for name in RAW_FEATURES if name not in raw_input_row.index]
+    if missing_raw_features:
+        raise ValueError(f"原始输入缺少必要字段：{missing_raw_features}。")
+
+    grouped_values = {name: 0.0 for name in RAW_FEATURES}
+    found_ft_columns = []
+    for processed_name, shap_value in zip(processed_names, values, strict=True):
+        original_name = get_original_feature_name(processed_name)
+        grouped_values[original_name] += float(shap_value)
+        if original_name == "FT":
+            found_ft_columns.append(processed_name)
+
+    if not found_ft_columns:
+        raise ValueError(
+            "未找到 FT 对应的编码列，无法聚合纤维类型贡献。"
+            "请检查预处理器的 get_feature_names_out() 输出。"
+        )
+
+    base_value = float(np.asarray(sample_exp.base_values).reshape(-1)[0])
+    return shap.Explanation(
+        values=np.array([grouped_values[name] for name in RAW_FEATURES], dtype=float),
+        base_values=base_value,
+        data=np.array(
+            [format_raw_feature_value(name, raw_input_row[name]) for name in RAW_FEATURES],
+            dtype=object,
+        ),
+        feature_names=[FEATURE_DISPLAY_NAMES[name] for name in RAW_FEATURES],
+    )
+
+
+def build_shap_diagnostics(sample_exp: shap.Explanation, prediction: float) -> dict:
+    base_value = float(np.asarray(sample_exp.base_values).reshape(-1)[0])
+    shap_total = float(np.asarray(sample_exp.values).reshape(-1).sum())
+    reconstructed_prediction = base_value + shap_total
+    difference = float(prediction - reconstructed_prediction)
+    return {
+        "base_value": base_value,
+        "shap_total": shap_total,
+        "reconstructed_prediction": reconstructed_prediction,
+        "prediction": float(prediction),
+        "difference": difference,
+        "within_tolerance": abs(difference) <= 1e-6,
+    }
+
+
+def localize_waterfall_other_features(ax):
+    """将 SHAP 自动生成的英文合并项转换为中文。"""
+    tick_labels = [tick_label.get_text() for tick_label in ax.get_yticklabels()]
+    localized_labels = []
+    for label_text in tick_labels:
+        if label_text.endswith(" other features"):
+            count = label_text.removesuffix(" other features")
+            localized_labels.append(f"其余 {count} 项特征合计")
+        else:
+            localized_labels.append(label_text)
+    ax.set_yticklabels(localized_labels)
+
+
+def plot_waterfall_from_explanation(sample_exp, max_display=WATERFALL_MAX_DISPLAY):
     plt.close("all")
-    plt.figure(figsize=(4.6, 3.2))
     shap.plots.waterfall(sample_exp, max_display=max_display, show=False)
     fig = plt.gcf()
-    plt.tight_layout()
+
+    # SHAP 会按特征数重设画布；必须在绘制后覆写尺寸，才能适配 16:9 屏幕。
+    fig.set_size_inches(11.5, 5.13, forward=True)
+    fig.set_facecolor("#FFFFFF")
+
+    ax = fig.axes[0]
+    total_features = len(np.asarray(sample_exp.values).reshape(-1))
+    individual_features = min(WATERFALL_TOP_FEATURE_COUNT, total_features)
+    if total_features > individual_features:
+        remaining_features = total_features - individual_features
+        ax.set_title(
+            f"瀑布图：前 {individual_features} 项贡献及其余 {remaining_features} 项合计",
+            fontsize=13,
+            fontweight="bold",
+            pad=12,
+        )
+    else:
+        ax.set_title("瀑布图：全部特征贡献", fontsize=13, fontweight="bold", pad=12)
+
+    ax.grid(axis="y", linestyle=":", linewidth=0.8, alpha=0.28)
+    fig.subplots_adjust(left=0.42, right=0.97, top=0.88, bottom=0.13)
+    fig.canvas.draw()
+    localize_waterfall_other_features(ax)
+    ax.tick_params(axis="x", labelsize=10, colors="#3A3A3A")
+    for tick_label in ax.get_yticklabels():
+        tick_label.set_fontsize(10)
+        tick_label.set_color("#222222")
     return fig
 
 
@@ -525,6 +685,8 @@ if "local_shap_error" not in st.session_state:
     st.session_state["local_shap_error"] = ""
 if "local_shap_source" not in st.session_state:
     st.session_state["local_shap_source"] = None
+if "local_shap_diagnostics" not in st.session_state:
+    st.session_state["local_shap_diagnostics"] = None
 if "shap_in_progress" not in st.session_state:
     st.session_state["shap_in_progress"] = False
 
@@ -572,6 +734,7 @@ if predict_clicked:
     st.session_state["local_shap_ok"] = None
     st.session_state["local_shap_error"] = ""
     st.session_state["local_shap_source"] = None
+    st.session_state["local_shap_diagnostics"] = None
     st.session_state["shap_in_progress"] = False
 
     try:
@@ -610,7 +773,7 @@ if "y_pred" in st.session_state:
         f"""
         <div style="background-color:#F3F3F3;padding:14px;border-radius:8px;text-align:center;">
             <div style="font-size:28px;font-weight:800;color:#000000;line-height:1.4;">
-                预测 ST = {st.session_state['y_pred']:.2f}
+                预测 ST = {st.session_state['y_pred']:.2f} MPa
             </div>
         </div>
         """,
@@ -652,11 +815,21 @@ if st.session_state.get("shap_in_progress", False):
             current_explainer,
             st.session_state["X_input"],
         )
+        aggregated_sample_exp = aggregate_shap_to_original_features(
+            sample_exp=local_exp[0],
+            transformed_feature_names=st.session_state["X_input"].columns,
+            raw_input_row=st.session_state["raw_input_df"].iloc[0],
+        )
+        diagnostics = build_shap_diagnostics(
+            aggregated_sample_exp,
+            st.session_state["y_pred"],
+        )
 
-        st.session_state["local_shap_exp"] = local_exp
+        st.session_state["local_shap_exp"] = aggregated_sample_exp
         st.session_state["local_shap_ok"] = True
         st.session_state["local_shap_error"] = ""
         st.session_state["local_shap_source"] = current_explainer_source
+        st.session_state["local_shap_diagnostics"] = diagnostics
         st.session_state["shap_in_progress"] = False
 
         st.rerun()
@@ -666,26 +839,41 @@ if st.session_state.get("shap_in_progress", False):
         st.session_state["local_shap_ok"] = False
         st.session_state["local_shap_error"] = traceback.format_exc()
         st.session_state["local_shap_source"] = None
+        st.session_state["local_shap_diagnostics"] = None
         st.session_state["shap_in_progress"] = False
 
         st.rerun()
 
 elif "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
-    local_exp = st.session_state["local_shap_exp"]
-    sample_exp = local_exp[0]
+    sample_exp = st.session_state["local_shap_exp"]
 
-    # if st.session_state.get("local_shap_source"):
-    #     st.caption(f"Explainer source: {st.session_state['local_shap_source']}")
+    with st.expander("显示 SHAP 一致性检查"):
+        diagnostics = st.session_state.get("local_shap_diagnostics")
+        if diagnostics is not None:
+            st.code(
+                "\n".join([
+                    f"模型预测值: {diagnostics['prediction']:.12f} MPa",
+                    f"SHAP 重构值: {diagnostics['reconstructed_prediction']:.12f} MPa",
+                    f"差值: {diagnostics['difference']:.12e}",
+                    f"误差是否不超过 1e-6: {diagnostics['within_tolerance']}",
+                ])
+            )
+            if not diagnostics["within_tolerance"]:
+                st.warning("当前 SHAP 解释未达到 1e-6 加和误差阈值；预测值未被修改。")
 
-    st.write("### Waterfall 图")
-    c_left, c_mid, c_right = st.columns([1, 2, 1])
-    with c_mid:
-        try:
-            fig = plot_waterfall_from_explanation(sample_exp, max_display=12)
-            st.pyplot(fig, clear_figure=True, use_container_width=False)
-        except Exception:
-            st.error("Waterfall 图绘制失败。")
-            st.code(traceback.format_exc())
+    st.write("### 瀑布图")
+
+    try:
+        fig = plot_waterfall_from_explanation(
+            sample_exp,
+            max_display=WATERFALL_MAX_DISPLAY,
+        )
+        c_left, c_mid, c_right = st.columns([1, 6, 1])
+        with c_mid:
+            st.pyplot(fig, clear_figure=True, width="content")
+    except Exception:
+        st.error("瀑布图绘制失败。")
+        st.code(traceback.format_exc())
 
     st.write("### 特征贡献表")
     try:
@@ -695,7 +883,7 @@ elif "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
 
         contrib_df = pd.DataFrame({
             "特征": feature_names,
-            "特征值": feature_data,
+            "原始值": feature_data,
             "SHAP 值": values,
             "|SHAP|": np.abs(values),
         }).sort_values("|SHAP|", ascending=False)
