@@ -5,7 +5,6 @@ import traceback
 import joblib
 import numpy as np
 import pandas as pd
-from matplotlib import font_manager
 import matplotlib.pyplot as plt
 import shap
 import streamlit as st
@@ -33,38 +32,6 @@ BASE_DIR = Path(__file__).resolve().parent
 GUI_ARTIFACTS_DIR = BASE_DIR / "artifacts" / "gui"
 
 
-CHINESE_FONT_CANDIDATES = [
-    "Microsoft YaHei",
-    "SimHei",
-    "SimSun",
-    "Noto Sans CJK SC",
-    "Noto Sans CJK TC",
-    "Noto Sans CJK JP",
-    "Noto Serif CJK SC",
-    "Source Han Sans SC",
-    "WenQuanYi Micro Hei",
-    "WenQuanYi Zen Hei",
-    "Arial Unicode MS",
-]
-
-try:
-    font_manager.fontManager = font_manager._load_fontmanager(try_read_cache=False)
-except Exception:
-    pass
-
-available_fonts = {font.name for font in font_manager.fontManager.ttflist}
-preferred_fonts = [font for font in CHINESE_FONT_CANDIDATES if font in available_fonts]
-dynamic_fonts = sorted(
-    font
-    for font in available_fonts
-    if any(token in font for token in ["Noto Sans CJK", "Noto Serif CJK", "Source Han", "WenQuanYi"])
-)
-chinese_fonts = list(dict.fromkeys(preferred_fonts + dynamic_fonts))
-
-plt.rcParams["font.family"] = "sans-serif"
-plt.rcParams["font.sans-serif"] = (chinese_fonts or CHINESE_FONT_CANDIDATES) + ["DejaVu Sans", "Arial"]
-plt.rcParams["axes.unicode_minus"] = False
-
 # 改为 CPU 版 model / preprocessor
 MODEL_PATH = GUI_ARTIFACTS_DIR / "TabPFN_CPU_ST_model.joblib"
 PREPROCESSOR_PATH = GUI_ARTIFACTS_DIR / "TabPFN_CPU_ST_preprocessor.joblib"
@@ -72,13 +39,6 @@ PREPROCESSOR_PATH = GUI_ARTIFACTS_DIR / "TabPFN_CPU_ST_preprocessor.joblib"
 # 优先寻找 CPU 版 explainer；若没有，再尝试旧的 GPU 版 explainer
 EXPLAINER_PATH_CPU = GUI_ARTIFACTS_DIR / "shap_explainer_TabPFN_CPU_ST.joblib"
 EXPLAINER_PATH_GPU = GUI_ARTIFACTS_DIR / "shap_explainer_TabPFN_GPU_ST.joblib"
-
-# TabPFN 在 Streamlit Community Cloud 的 CPU 容器中运行时，直接调用
-# shap.SamplingExplainer 可能触发底层进程崩溃。以下参数用于以保存的
-# background 为基准进行轻量级 Shapley 采样，避免在界面线程中执行该调用。
-LOCAL_SHAPLEY_PERMUTATIONS = 8
-LOCAL_SHAPLEY_RANDOM_SEED = 20260712
-
 
 # ============================================================
 # 原始输入特征（14个）
@@ -192,10 +152,6 @@ FEATURE_VALUE_UNITS = {
     "TS": "MPa",
 }
 
-WATERFALL_TOP_FEATURE_COUNT = 8
-WATERFALL_MAX_DISPLAY = WATERFALL_TOP_FEATURE_COUNT + 1
-
-
 def format_ft_option(option):
     return FT_DISPLAY_LABELS.get(str(option), str(option))
 
@@ -256,7 +212,9 @@ def load_artifacts():
     info = {
         "model": None,
         "preprocessor": None,
+        "explainer": None,
         "errors": {},
+        "explainer_source": None,
     }
 
     try:
@@ -269,47 +227,37 @@ def load_artifacts():
     except Exception:
         info["errors"]["preprocessor"] = traceback.format_exc()
 
-    # SHAP explainer 体积较大，只记录其状态；实际使用时再延迟加载。
+    # 与已验证可运行的英文版保持一致：启动时加载保存的 CPU explainer。
     info["explainer_cpu_path"] = str(EXPLAINER_PATH_CPU)
     info["explainer_cpu_exists"] = EXPLAINER_PATH_CPU.exists()
+    if EXPLAINER_PATH_CPU.exists():
+        try:
+            info["explainer"] = joblib.load(EXPLAINER_PATH_CPU)
+            info["explainer_source"] = "cpu_joblib"
+        except Exception:
+            info["errors"]["explainer_cpu"] = traceback.format_exc()
+    else:
+        info["errors"]["explainer_cpu_missing"] = (
+            f"CPU explainer file not found: {EXPLAINER_PATH_CPU}"
+        )
+
     info["explainer_gpu_path"] = str(EXPLAINER_PATH_GPU)
     info["explainer_gpu_exists"] = EXPLAINER_PATH_GPU.exists()
+    if info["explainer"] is None and EXPLAINER_PATH_GPU.exists():
+        try:
+            info["explainer"] = joblib.load(EXPLAINER_PATH_GPU)
+            info["explainer_source"] = "gpu_joblib"
+        except Exception:
+            info["errors"]["explainer_gpu"] = traceback.format_exc()
+    elif info["explainer"] is None and not EXPLAINER_PATH_GPU.exists():
+        info["errors"]["explainer_gpu_missing"] = (
+            f"GPU explainer file not found: {EXPLAINER_PATH_GPU}"
+        )
 
     return info
 
 
 artifacts = load_artifacts()
-
-
-@st.cache_resource(show_spinner=False)
-def load_saved_shap_background():
-    """延迟读取保存的 SHAP background，而不执行保存 explainer 的推理逻辑。"""
-    load_errors = []
-    for path, source in [
-        (EXPLAINER_PATH_CPU, "cpu_joblib"),
-        (EXPLAINER_PATH_GPU, "gpu_joblib"),
-    ]:
-        if not path.exists():
-            load_errors.append(f"未找到 explainer 文件: {path}")
-            continue
-        try:
-            saved_explainer = joblib.load(path)
-            saved_background = getattr(saved_explainer, "data", None)
-            saved_background = getattr(saved_background, "data", saved_background)
-            background_array = np.asarray(saved_background, dtype=np.float32)
-            if background_array.ndim != 2 or background_array.shape[0] == 0:
-                raise ValueError(
-                    "保存的 explainer 未包含有效的二维 background 数据。"
-                )
-
-            # 只缓存小型 background 数组，避免常驻 40 MB 以上的 explainer/model 对象。
-            background_array = background_array.copy()
-            del saved_explainer
-            return background_array, source
-        except Exception:
-            load_errors.append(f"加载失败: {path}\n{traceback.format_exc()}")
-
-    raise RuntimeError("\n\n".join(load_errors))
 
 
 # ============================================================
@@ -416,9 +364,20 @@ def build_fallback_background(preprocessor):
 
 
 @st.cache_resource(show_spinner=False)
-def get_runtime_fallback_background(_preprocessor):
+def get_runtime_fallback_explainer(_model, _preprocessor):
     background_df = build_fallback_background(_preprocessor)
-    return background_df.to_numpy(dtype=np.float32), "runtime_default"
+    try:
+        explainer = shap.SamplingExplainer(_model.predict, background_df)
+        return explainer, "runtime_sampling"
+    except Exception:
+        explainer = shap.Explainer(_model.predict, background_df)
+        return explainer, "runtime_generic"
+
+
+def make_local_shap_explanation(explainer, X_df):
+    if explainer is None:
+        raise RuntimeError("未能加载 SHAP explainer，无法生成单样本 SHAP 解释。")
+    return explainer(X_df)
 
 
 def format_raw_feature_value(feature_name: str, value) -> str:
@@ -492,108 +451,6 @@ def aggregate_shap_to_original_features(
     )
 
 
-def get_original_feature_groups(transformed_feature_names):
-    """返回每个原始工程变量在模型输入空间中的列索引。"""
-    groups = {name: [] for name in RAW_FEATURES}
-    for index, processed_name in enumerate(transformed_feature_names):
-        original_name = get_original_feature_name(str(processed_name))
-        groups[original_name].append(index)
-
-    missing_groups = [name for name, indices in groups.items() if not indices]
-    if missing_groups:
-        raise ValueError(
-            "转换后的模型输入缺少以下原始变量对应列："
-            f"{missing_groups}。"
-        )
-    return {name: np.asarray(indices, dtype=int) for name, indices in groups.items()}
-
-
-def estimate_local_shapley_explanation(
-    model,
-    X_df: pd.DataFrame,
-    raw_input_row: pd.Series,
-    background_array: np.ndarray,
-    prediction: float,
-    n_permutations: int = LOCAL_SHAPLEY_PERMUTATIONS,
-) -> shap.Explanation:
-    """
-    以保存的 background 对局部贡献进行 Monte Carlo Shapley 采样。
-
-    该实现只使用模型的批量预测接口，不调用 SamplingExplainer；这是为了避免
-    Streamlit Community Cloud 的 CPU 容器在 SamplingExplainer 推理阶段崩溃。
-    """
-    transformed_feature_names = [str(name) for name in X_df.columns]
-    feature_groups = get_original_feature_groups(transformed_feature_names)
-    target_row = X_df.to_numpy(dtype=np.float32, copy=True).reshape(-1)
-    background_array = np.asarray(background_array, dtype=np.float32)
-
-    if background_array.ndim != 2:
-        raise ValueError("SHAP background 必须是二维数组。")
-    if background_array.shape[1] != len(transformed_feature_names):
-        raise ValueError(
-            "SHAP background 的特征数量与当前模型输入不一致："
-            f"{background_array.shape[1]} != {len(transformed_feature_names)}。"
-        )
-
-    missing_raw_features = [name for name in RAW_FEATURES if name not in raw_input_row.index]
-    if missing_raw_features:
-        raise ValueError(f"原始输入缺少必要字段：{missing_raw_features}。")
-
-    sample_count = min(max(1, int(n_permutations)), len(background_array))
-    random_generator = np.random.default_rng(LOCAL_SHAPLEY_RANDOM_SEED)
-    background_indices = random_generator.choice(
-        len(background_array), size=sample_count, replace=False
-    )
-
-    path_rows = []
-    path_metadata = []
-    for background_index in background_indices:
-        state = background_array[background_index].copy()
-        feature_order = [str(name) for name in random_generator.permutation(RAW_FEATURES)]
-        path_start = len(path_rows)
-        path_rows.append(state.copy())
-        for feature_name in feature_order:
-            state[feature_groups[feature_name]] = target_row[feature_groups[feature_name]]
-            path_rows.append(state.copy())
-        path_metadata.append((path_start, feature_order))
-
-    path_df = pd.DataFrame(
-        np.asarray(path_rows, dtype=np.float32), columns=transformed_feature_names
-    )
-    path_predictions = np.asarray(model.predict(path_df), dtype=float).reshape(-1)
-    expected_path_count = sample_count * (len(RAW_FEATURES) + 1)
-    if len(path_predictions) != expected_path_count:
-        raise RuntimeError(
-            "局部贡献计算返回的预测数量异常："
-            f"{len(path_predictions)} != {expected_path_count}。"
-        )
-
-    grouped_values = {name: 0.0 for name in RAW_FEATURES}
-    for path_start, feature_order in path_metadata:
-        for order_index, feature_name in enumerate(feature_order):
-            grouped_values[feature_name] += (
-                path_predictions[path_start + order_index + 1]
-                - path_predictions[path_start + order_index]
-            )
-    for feature_name in grouped_values:
-        grouped_values[feature_name] /= sample_count
-
-    values = np.array([grouped_values[name] for name in RAW_FEATURES], dtype=float)
-
-    # TabPFN 的批量预测会受同批样本组成轻微影响。这里以 GUI 的单样本预测值
-    # 作为最终输出，基准值由该输出与贡献之和确定，从而严格保持加和关系。
-    base_value = float(prediction - values.sum())
-    return shap.Explanation(
-        values=values,
-        base_values=base_value,
-        data=np.array(
-            [format_raw_feature_value(name, raw_input_row[name]) for name in RAW_FEATURES],
-            dtype=object,
-        ),
-        feature_names=[FEATURE_DISPLAY_NAMES[name] for name in RAW_FEATURES],
-    )
-
-
 def build_shap_diagnostics(sample_exp: shap.Explanation, prediction: float) -> dict:
     base_value = float(np.asarray(sample_exp.base_values).reshape(-1)[0])
     shap_total = float(np.asarray(sample_exp.values).reshape(-1).sum())
@@ -609,50 +466,12 @@ def build_shap_diagnostics(sample_exp: shap.Explanation, prediction: float) -> d
     }
 
 
-def localize_waterfall_other_features(ax):
-    """将 SHAP 自动生成的英文合并项转换为中文。"""
-    tick_labels = [tick_label.get_text() for tick_label in ax.get_yticklabels()]
-    localized_labels = []
-    for label_text in tick_labels:
-        if label_text.endswith(" other features"):
-            count = label_text.removesuffix(" other features")
-            localized_labels.append(f"其余 {count} 项特征合计")
-        else:
-            localized_labels.append(label_text)
-    ax.set_yticklabels(localized_labels)
-
-
-def plot_waterfall_from_explanation(sample_exp, max_display=WATERFALL_MAX_DISPLAY):
+def plot_waterfall_from_explanation(sample_exp, max_display=12):
     plt.close("all")
+    plt.figure(figsize=(4.6, 3.2))
     shap.plots.waterfall(sample_exp, max_display=max_display, show=False)
     fig = plt.gcf()
-
-    # SHAP 会按特征数重设画布；必须在绘制后覆写尺寸，才能适配 16:9 屏幕。
-    fig.set_size_inches(11.5, 5.13, forward=True)
-    fig.set_facecolor("#FFFFFF")
-
-    ax = fig.axes[0]
-    total_features = len(np.asarray(sample_exp.values).reshape(-1))
-    individual_features = min(WATERFALL_TOP_FEATURE_COUNT, total_features)
-    if total_features > individual_features:
-        remaining_features = total_features - individual_features
-        ax.set_title(
-            f"瀑布图：前 {individual_features} 项贡献及其余 {remaining_features} 项合计",
-            fontsize=13,
-            fontweight="bold",
-            pad=12,
-        )
-    else:
-        ax.set_title("瀑布图：全部特征贡献", fontsize=13, fontweight="bold", pad=12)
-
-    ax.grid(axis="y", linestyle=":", linewidth=0.8, alpha=0.28)
-    fig.subplots_adjust(left=0.42, right=0.97, top=0.88, bottom=0.13)
-    fig.canvas.draw()
-    localize_waterfall_other_features(ax)
-    ax.tick_params(axis="x", labelsize=10, colors="#3A3A3A")
-    for tick_label in ax.get_yticklabels():
-        tick_label.set_fontsize(10)
-        tick_label.set_color("#222222")
+    plt.tight_layout()
     return fig
 
 
@@ -907,22 +726,25 @@ st.markdown(
 )
 
 if st.session_state.get("shap_in_progress", False):
-    st.info("ST 结果已生成，正在为当前样本计算局部 SHAP 贡献，请稍候。")
+    st.info("ST 结果已生成，正在为当前样本计算 SHAP 分析，请稍候。")
 
     try:
-        try:
-            current_background, current_explainer_source = load_saved_shap_background()
-        except Exception:
-            current_background, current_explainer_source = get_runtime_fallback_background(
+        current_explainer = artifacts.get("explainer")
+        current_explainer_source = artifacts.get("explainer_source")
+        if current_explainer is None:
+            current_explainer, current_explainer_source = get_runtime_fallback_explainer(
+                artifacts["model"],
                 artifacts["preprocessor"],
             )
 
-        aggregated_sample_exp = estimate_local_shapley_explanation(
-            model=artifacts["model"],
-            X_df=st.session_state["X_input"],
+        local_exp = make_local_shap_explanation(
+            current_explainer,
+            st.session_state["X_input"],
+        )
+        aggregated_sample_exp = aggregate_shap_to_original_features(
+            sample_exp=local_exp[0],
+            transformed_feature_names=st.session_state["X_input"].columns,
             raw_input_row=st.session_state["raw_input_df"].iloc[0],
-            background_array=current_background,
-            prediction=st.session_state["y_pred"],
         )
         diagnostics = build_shap_diagnostics(
             aggregated_sample_exp,
@@ -970,7 +792,7 @@ elif "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
     try:
         fig = plot_waterfall_from_explanation(
             sample_exp,
-            max_display=WATERFALL_MAX_DISPLAY,
+            max_display=12,
         )
         c_left, c_mid, c_right = st.columns([1, 6, 1])
         with c_mid:
