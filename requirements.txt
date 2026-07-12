@@ -8,4 +8,4 @@ shap==0.51.0
 tabpfn==6.4.1
 tabpfn-common-utils==0.2.16
 openpyxl==3.1.5
-torch
+torch==2.7.0

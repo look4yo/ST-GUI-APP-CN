@@ -1,0 +1,2 @@
+# Streamlit Community Cloud 没有 CUDA 设备；强制 uv 选择 PyTorch CPU 轮子。
+torch-backend = "cpu"

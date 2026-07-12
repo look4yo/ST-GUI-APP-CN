@@ -250,9 +250,7 @@ def load_artifacts():
     info = {
         "model": None,
         "preprocessor": None,
-        "explainer": None,
         "errors": {},
-        "explainer_source": None,
     }
 
     try:
@@ -265,34 +263,35 @@ def load_artifacts():
     except Exception:
         info["errors"]["preprocessor"] = traceback.format_exc()
 
-    # 1) 优先加载 CPU explainer
+    # SHAP explainer 体积较大，只记录其状态；实际使用时再延迟加载。
     info["explainer_cpu_path"] = str(EXPLAINER_PATH_CPU)
     info["explainer_cpu_exists"] = EXPLAINER_PATH_CPU.exists()
-    if EXPLAINER_PATH_CPU.exists():
-        try:
-            info["explainer"] = joblib.load(EXPLAINER_PATH_CPU)
-            info["explainer_source"] = "cpu_joblib"
-        except Exception:
-            info["errors"]["explainer_cpu"] = traceback.format_exc()
-    else:
-        info["errors"]["explainer_cpu_missing"] = f"未找到 CPU explainer 文件: {EXPLAINER_PATH_CPU}"
-
-    # 2) 若 CPU explainer 不可用，再尝试旧 GPU explainer
     info["explainer_gpu_path"] = str(EXPLAINER_PATH_GPU)
     info["explainer_gpu_exists"] = EXPLAINER_PATH_GPU.exists()
-    if info["explainer"] is None and EXPLAINER_PATH_GPU.exists():
-        try:
-            info["explainer"] = joblib.load(EXPLAINER_PATH_GPU)
-            info["explainer_source"] = "gpu_joblib"
-        except Exception:
-            info["errors"]["explainer_gpu"] = traceback.format_exc()
-    elif info["explainer"] is None and not EXPLAINER_PATH_GPU.exists():
-        info["errors"]["explainer_gpu_missing"] = f"未找到 GPU explainer 文件: {EXPLAINER_PATH_GPU}"
 
     return info
 
 
 artifacts = load_artifacts()
+
+
+@st.cache_resource(show_spinner=False)
+def load_saved_explainer():
+    """仅在用户请求局部 SHAP 分析时加载保存的 explainer。"""
+    load_errors = []
+    for path, source in [
+        (EXPLAINER_PATH_CPU, "cpu_joblib"),
+        (EXPLAINER_PATH_GPU, "gpu_joblib"),
+    ]:
+        if not path.exists():
+            load_errors.append(f"未找到 explainer 文件: {path}")
+            continue
+        try:
+            return joblib.load(path), source
+        except Exception:
+            load_errors.append(f"加载失败: {path}\n{traceback.format_exc()}")
+
+    raise RuntimeError("\n\n".join(load_errors))
 
 
 # ============================================================
@@ -802,10 +801,9 @@ if st.session_state.get("shap_in_progress", False):
     st.info("ST 结果已生成，正在为当前样本计算 SHAP 分析，请稍候。")
 
     try:
-        current_explainer = artifacts["explainer"]
-        current_explainer_source = artifacts.get("explainer_source")
-
-        if current_explainer is None:
+        try:
+            current_explainer, current_explainer_source = load_saved_explainer()
+        except Exception:
             current_explainer, current_explainer_source = get_runtime_fallback_explainer(
                 artifacts["model"],
                 artifacts["preprocessor"],
