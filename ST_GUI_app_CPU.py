@@ -508,9 +508,9 @@ def build_shap_diagnostics(sample_exp: shap.Explanation, prediction: float) -> d
 
 def plot_waterfall_from_explanation(sample_exp, max_display=12):
     plt.close("all")
-    plt.figure(figsize=(4.6, 3.2))
     shap.plots.waterfall(sample_exp, max_display=max_display, show=False)
     fig = plt.gcf()
+    fig.set_size_inches(11.5, 5.13, forward=True)
     plt.tight_layout()
     return fig
 
@@ -834,9 +834,9 @@ elif "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
             sample_exp,
             max_display=12,
         )
-        c_left, c_mid, c_right = st.columns([1, 6, 1])
+        c_left, c_mid, c_right = st.columns([1, 10, 1])
         with c_mid:
-            st.pyplot(fig, clear_figure=True, width="content")
+            st.pyplot(fig, clear_figure=True, width="stretch")
     except Exception:
         st.error("瀑布图绘制失败。")
         st.code(traceback.format_exc())
